@@ -155,10 +155,16 @@ impl Host {
     }
 
     fn reload(&mut self) {
+        let was_vietnamese = self.config().vietnamese;
         self.settings = Settings::load();
         let config = self.settings.config.clone();
         self.processor.set_macros(load_macros(config.code_table));
         self.processor.set_config(config);
+        // The language was switched from the settings window: remember it for
+        // the application the user came from, or smart switch would undo it.
+        if self.config().vietnamese != was_vietnamese && self.remember_app() {
+            self.save();
+        }
         self.refresh_tray();
     }
 

@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use rustkey_engine::{CodeTable, Config, MacroTable};
@@ -44,6 +45,12 @@ pub fn data_dir() -> Result<PathBuf> {
 
 fn settings_path() -> Result<PathBuf> {
     Ok(data_dir()?.join(SETTINGS_FILE))
+}
+
+/// Last modification time of `settings.json`, used to notice changes made by
+/// the other process.
+pub fn settings_modified() -> Option<SystemTime> {
+    fs::metadata(settings_path().ok()?).ok()?.modified().ok()
 }
 
 fn macros_path() -> Result<PathBuf> {

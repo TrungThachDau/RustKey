@@ -2,6 +2,12 @@
 //!
 //! It runs in its own process (`rustkey.exe --settings`). Every change is
 //! written to disk right away and the tray process is asked to reload.
+//!
+//! Everything lives on a single, fixed width screen: the language switch and
+//! main choices on top, the option groups side by side below and a short
+//! footer.
+
+use std::time::Duration;
 
 use rustkey_engine::{CodeTable, Config, InputType, MacroTable, keys};
 use windows_reactor::*;
@@ -12,54 +18,15 @@ use crate::win::{self, WM_RUSTKEY_RELOAD};
 /// Title of the settings window (also used to find an existing window).
 pub const WINDOW_TITLE: &str = "RustKey – Cài đặt";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Page {
-    Typing,
-    Spelling,
-    Macros,
-    System,
-    About,
-}
+/// Client size in DIPs. The width is fixed; the height fits everything
+/// without scrolling (a scroll bar appears on shorter screens).
+const WINDOW_SIZE: (f64, f64) = (700.0, 800.0);
+/// The window can only get shorter than this, never wider or narrower.
+const MIN_WINDOW_HEIGHT: f64 = 400.0;
+/// How often the settings file is checked for changes made by the tray.
+const WATCH_INTERVAL: Duration = Duration::from_millis(400);
 
-impl Page {
-    const ALL: [Page; 5] = [Page::Typing, Page::Spelling, Page::Macros, Page::System, Page::About];
-
-    fn tag(self) -> &'static str {
-        match self {
-            Page::Typing => "typing",
-            Page::Spelling => "spelling",
-            Page::Macros => "macros",
-            Page::System => "system",
-            Page::About => "about",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Page::Typing => "Bộ gõ",
-            Page::Spelling => "Chính tả",
-            Page::Macros => "Gõ tắt",
-            Page::System => "Hệ thống",
-            Page::About => "Thông tin",
-        }
-    }
-
-    fn symbol(self) -> Symbol {
-        match self {
-            Page::Typing => Symbol::Keyboard,
-            Page::Spelling => Symbol::Font,
-            Page::Macros => Symbol::List,
-            Page::System => Symbol::Setting,
-            Page::About => Symbol::Help,
-        }
-    }
-
-    fn from_tag(tag: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|page| page.tag() == tag)
-    }
-}
-
-/// Boolean options shown as switches or check boxes.
+/// Boolean options shown as check boxes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flag {
     FreeMark,
@@ -143,7 +110,9 @@ fn hotkey_key_name(key: Option<u16>) -> String {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Navigate(Option<String>),
+    Vietnamese(bool),
+    /// `settings.json` was changed (e.g. the language was switched by hotkey).
+    SettingsChanged,
     Flag(Flag, bool),
     InputType(Option<usize>),
     CodeTable(Option<usize>),
@@ -165,7 +134,6 @@ pub struct SettingsInput {
 }
 
 pub struct SettingsWindow {
-    page: Page,
     settings: Settings,
     macros: MacroTable,
     autostart: bool,
@@ -198,17 +166,29 @@ impl SettingsWindow {
         self.report(result.map_err(|e| format!("{e:#}")));
         win::post_to_tray(WM_RUSTKEY_RELOAD);
     }
+
+    /// Sends [`Message::SettingsChanged`] once `settings.json` is modified, so
+    /// the window follows changes made by the tray while it is open.
+    fn watch_settings(context: &ComponentContext<Self>) {
+        let since = settings::settings_modified();
+        context.spawn_background(move |cancel| {
+            while !cancel.is_cancelled() && settings::settings_modified() == since {
+                std::thread::sleep(WATCH_INTERVAL);
+            }
+            Message::SettingsChanged
+        });
+    }
 }
 
 impl Component for SettingsWindow {
     type Input = SettingsInput;
     type Message = Message;
 
-    fn create(_input: &SettingsInput, _context: &ComponentContext<Self>) -> Self {
+    fn create(_input: &SettingsInput, context: &ComponentContext<Self>) -> Self {
+        Self::watch_settings(context);
         let settings = Settings::load();
         let macros = settings::load_macros(settings.config.code_table);
         Self {
-            page: Page::Typing,
             settings,
             macros,
             autostart: win::autostart_enabled(),
@@ -219,12 +199,16 @@ impl Component for SettingsWindow {
         }
     }
 
-    fn update(&mut self, message: Message, _context: &ComponentContext<Self>) {
+    fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
         match message {
-            Message::Navigate(tag) => {
-                if let Some(page) = tag.as_deref().and_then(Page::from_tag) {
-                    self.page = page;
+            Message::Vietnamese(value) => {
+                if value != self.settings.config.vietnamese {
+                    self.change_config(|config| config.vietnamese = value);
                 }
+            }
+            Message::SettingsChanged => {
+                self.settings = Settings::load();
+                Self::watch_settings(context);
             }
             Message::Flag(flag, value) => {
                 if flag.get(&self.settings.config) != value {
@@ -300,79 +284,44 @@ impl Component for SettingsWindow {
     fn view(&self, input: &SettingsInput, context: &mut ViewContext<Self>) -> View {
         context.window_title(WINDOW_TITLE);
         let mut visuals = WindowVisuals::new()
-            .client_size(900.0, 680.0)
+            .client_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
+            .constraints(WindowConstraints {
+                min_width: Some(WINDOW_SIZE.0),
+                min_height: Some(MIN_WINDOW_HEIGHT),
+                max_width: Some(WINDOW_SIZE.0),
+                max_height: None,
+            })
             .backdrop(WindowBackdrop::Mica);
         if let Some(icon) = input.icon {
             visuals = visuals.icon(icon);
         }
         context.window_visuals(visuals);
 
-        let menu_items = Page::ALL.map(|page| {
-            (
-                page.tag(),
-                NavigationViewItem::new()
-                    .tag(page.tag())
-                    .is_selected(page == self.page)
-                    .slots([
-                        SlotView::new(NavigationViewItemSlot::Content, page.title()),
-                        SlotView::new(
-                            NavigationViewItemSlot::Icon,
-                            SymbolIcon::new().symbol(page.symbol()),
-                        ),
-                    ]),
-            )
-        });
-
-        let page = match self.page {
-            Page::Typing => self.typing_page(context),
-            Page::Spelling => self.spelling_page(context),
-            Page::Macros => self.macros_page(context),
-            Page::System => self.system_page(context),
-            Page::About => about_page(),
-        };
-
-        let error: View = match &self.error {
-            Some(message) => InfoBar::new()
-                .title("Lỗi")
-                .message(message.clone())
-                .severity(InfoBarSeverity::Error)
-                .is_open(true)
-                .is_closable(true)
-                .on_closed(context.message(Message::DismissError))
-                .into(),
-            None => View::empty(),
-        };
-
-        let body = StackPanel::new()
-            .spacing(8.0)
-            .margin(Thickness::new(32.0, 24.0, 32.0, 32.0))
-            .max_width(860.0)
-            .keyed_children([
-                (
-                    "title",
-                    View::from(
-                        TextBlock::new()
-                            .text(self.page.title())
-                            .font_size(28.0)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .margin(Thickness::new(0.0, 0.0, 0.0, 8.0)),
-                    ),
+        let groups = Grid::new()
+            .columns([GridLength::STAR, GridLength::STAR])
+            .column_spacing(12.0)
+            .children((
+                cell(0, 0, self.typing_group(context)),
+                cell(
+                    0,
+                    1,
+                    StackPanel::new()
+                        .spacing(12.0)
+                        .children((self.spelling_group(context), self.system_group(context))),
                 ),
-                ("error", error),
-                (self.page.tag(), page),
-            ]);
+            ));
 
-        NavigationView::new()
-            .pane_display_mode(NavigationViewPaneDisplayMode::Left)
-            .is_settings_visible(false)
-            .is_back_button_visible(NavigationViewBackButtonVisible::Collapsed)
-            .pane_title("RustKey")
-            .open_pane_length(220.0)
-            .on_selected_tag_changed(context.callback(Message::Navigate))
-            .slots([
-                SlotView::collection(NavigationViewSlot::MenuItems, menu_items),
-                SlotView::new(NavigationViewSlot::Content, ScrollViewer::new().content(body)),
-            ])
+        let layout = StackPanel::new()
+            .spacing(12.0)
+            .margin(Thickness::xy(20.0, 16.0))
+            .children((
+                self.main_bar(context),
+                groups,
+                self.macro_group(context),
+                self.footer(context),
+            ));
+
+        ScrollViewer::new().content(layout)
     }
 }
 
@@ -390,236 +339,284 @@ fn card(content: impl Into<View>) -> View {
         .content(content)
 }
 
-fn section(title: &str) -> View {
-    TextBlock::new()
-        .text(title)
-        .font_weight(FontWeight::SEMI_BOLD)
-        .margin(Thickness::new(0.0, 12.0, 0.0, 0.0))
-        .into()
+/// A titled card holding a group of options.
+fn group(title: &str, body: impl Into<View>) -> View {
+    card(StackPanel::new().spacing(2.0).children((
+        TextBlock::new()
+            .text(title)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .margin(Thickness::new(0.0, 0.0, 0.0, 6.0)),
+        body.into(),
+    )))
 }
 
-fn labelled(title: &str, description: &str, control: View) -> View {
-    let text = StackPanel::new()
-        .spacing(2.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .grid_column(0)
-        .children((
-        TextBlock::new().text(title).text_wrapping(TextWrapping::Wrap),
-        TextBlock::new()
-            .text(description)
-            .font_size(12.0)
-            .opacity(0.7)
-            .text_wrapping(TextWrapping::Wrap),
-    ));
-    card(
-        Grid::new()
-            .columns([GridLength::STAR, GridLength::Auto])
-            .column_spacing(16.0)
-            .children((
-                text,
-                Border::new()
-                    .grid_column(1)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .content(control),
-            )),
-    )
+/// Places `content` in a grid cell.
+fn cell(row: i32, column: i32, content: impl Into<View>) -> View {
+    Border::new().grid_row(row).grid_column(column).content(content)
+}
+
+fn caption(text: &str) -> TextBlock {
+    TextBlock::new().text(text).font_size(12.0).opacity(0.7)
+}
+
+/// Text that wraps instead of being clipped when its column gets narrow.
+fn wrapping(text: &str) -> TextBlock {
+    TextBlock::new().text(text).text_wrapping(TextWrapping::WrapWholeWords)
+}
+
+fn link(text: &str, uri: &str) -> View {
+    match HyperlinkButton::new().navigate_uri(uri) {
+        Ok(button) => button.content(text),
+        Err(_) => TextBlock::new().text(uri).into(),
+    }
 }
 
 impl SettingsWindow {
-    fn switch(
-        &self,
-        context: &ViewContext<Self>,
-        flag: Flag,
-        title: &str,
-        description: &str,
-        enabled: bool,
-    ) -> View {
-        let toggle = ToggleSwitch::new()
-            .is_on(flag.get(&self.settings.config))
-            .is_enabled(enabled)
-            .on_toggled(context.callback(move |value| Message::Flag(flag, value)))
-            .slots([
-                SlotView::new(ToggleSwitchSlot::OnContent, "Bật"),
-                SlotView::new(ToggleSwitchSlot::OffContent, "Tắt"),
-            ]);
-        labelled(title, description, toggle)
-    }
-
-    fn check(&self, context: &ViewContext<Self>, flag: Flag, text: &str) -> View {
-        CheckBox::new()
+    /// A key cap style toggle bound to a hotkey modifier.
+    fn modifier(&self, context: &ViewContext<Self>, flag: Flag, text: &str) -> View {
+        ToggleButton::new()
             .is_checked(flag.get(&self.settings.config))
             .on_is_checked_changed(context.callback(move |value| Message::Flag(flag, value)))
             .min_width(0.0)
             .content(text)
     }
 
-    fn typing_page(&self, context: &ViewContext<Self>) -> View {
+    /// A check box bound to `flag` with an explanatory tooltip.
+    fn option(&self, context: &ViewContext<Self>, flag: Flag, text: &str, tip: &str, enabled: bool) -> View {
+        CheckBox::new()
+            .is_checked(flag.get(&self.settings.config))
+            .is_enabled(enabled)
+            .on_is_checked_changed(context.callback(move |value| Message::Flag(flag, value)))
+            .min_width(0.0)
+            .content(wrapping(text))
+            .tooltip(tip)
+    }
+
+    /// Language switch, input method, code table and the switch hotkey.
+    fn main_bar(&self, context: &ViewContext<Self>) -> View {
         let config = &self.settings.config;
+        let keys = hotkey_keys();
+
+        let language = ToggleSwitch::new()
+            .is_on(config.vietnamese)
+            .on_toggled(context.callback(Message::Vietnamese))
+            .slots([
+                SlotView::new(ToggleSwitchSlot::Header, "Chế độ gõ"),
+                SlotView::new(ToggleSwitchSlot::OnContent, "Tiếng Việt"),
+                SlotView::new(ToggleSwitchSlot::OffContent, "Tiếng Anh"),
+            ]);
         let input_type = ComboBox::new()
             .items_source(InputType::ALL.map(InputType::name))
             .selected_index(InputType::ALL.iter().position(|t| *t == config.input_type))
             .on_selection_changed(context.callback(Message::InputType))
-            .min_width(220.0)
-            .into();
+            .min_width(0.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .slot(ComboBoxSlot::Header, "Kiểu gõ");
         let code_table = ComboBox::new()
             .items_source(CodeTable::ALL.map(CodeTable::name))
             .selected_index(config.code_table.index())
             .on_selection_changed(context.callback(Message::CodeTable))
-            .min_width(220.0)
-            .into();
+            .min_width(0.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .slot(ComboBoxSlot::Header, "Bảng mã");
+        let hotkey = StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(4.0)
+            .children((
+                TextBlock::new()
+                    .text("Phím chuyển Việt / Anh")
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .margin(Thickness::new(0.0, 0.0, 12.0, 0.0)),
+                self.modifier(context, Flag::HotkeyControl, "Ctrl"),
+                self.modifier(context, Flag::HotkeyAlt, "Alt"),
+                self.modifier(context, Flag::HotkeyShift, "Shift"),
+                self.modifier(context, Flag::HotkeyMeta, "Win"),
+                TextBlock::new()
+                    .text("+")
+                    .opacity(0.7)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .margin(Thickness::xy(4.0, 0.0)),
+                ComboBox::new()
+                    .items_source(keys.iter().map(|key| hotkey_key_name(*key)))
+                    .selected_index(keys.iter().position(|key| *key == config.switch_hotkey.key))
+                    .on_selection_changed(context.callback(Message::HotkeyKey))
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .min_width(0.0)
+                    .width(96.0),
+            ));
 
-        let keys = hotkey_keys();
-        let hotkey = card(
-            StackPanel::new().spacing(12.0).children((
-                StackPanel::new().spacing(2.0).children((
-                    TextBlock::new().text("Phím tắt chuyển Việt / Anh"),
-                    TextBlock::new()
-                        .text(format!("Hiện tại: {}", config.switch_hotkey))
-                        .font_size(12.0)
-                        .opacity(0.7),
-                )),
-                StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(16.0)
-                    .children((
-                        self.check(context, Flag::HotkeyControl, "Ctrl"),
-                        self.check(context, Flag::HotkeyAlt, "Alt"),
-                        self.check(context, Flag::HotkeyShift, "Shift"),
-                        self.check(context, Flag::HotkeyMeta, "Win"),
-                        ComboBox::new()
-                            .items_source(keys.iter().map(|key| hotkey_key_name(*key)))
-                            .selected_index(keys.iter().position(|key| *key == config.switch_hotkey.key))
-                            .on_selection_changed(context.callback(Message::HotkeyKey))
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .min_width(120.0),
-                        self.check(context, Flag::HotkeyBeep, "Phát tiếng bíp"),
-                    )),
-            )),
-        );
-
-        StackPanel::new().spacing(6.0).children((
-            labelled("Kiểu gõ", "Telex, VNI hoặc Telex giản lược.", input_type),
-            labelled("Bảng mã", "Bảng mã của văn bản được gửi tới ứng dụng.", code_table),
-            hotkey,
-            section("Tuỳ chọn gõ"),
-            self.switch(context, Flag::ModernOrthography, "Đặt dấu kiểu mới", "oà, uý thay vì òa, úy.", true),
-            self.switch(context, Flag::FreeMark, "Bỏ dấu tự do", "Cho phép gõ dấu ở bất kỳ vị trí nào trong từ.", true),
-            self.switch(
-                context,
-                Flag::QuickTelex,
-                "Gõ nhanh (Quick Telex)",
-                "cc → ch, gg → gi, kk → kh, nn → ng, qq → qu, pp → ph, tt → th.",
-                true,
-            ),
-            self.switch(context, Flag::QuickStartConsonant, "Phụ âm đầu nhanh", "f → ph, j → gi, w → qu.", true),
-            self.switch(context, Flag::QuickEndConsonant, "Phụ âm cuối nhanh", "g → ng, h → nh, k → ch.", true),
-            self.switch(
-                context,
-                Flag::UpperCaseFirstChar,
-                "Viết hoa chữ cái đầu câu",
-                "Tự động viết hoa sau dấu . ? ! và Enter.",
-                true,
-            ),
-            self.switch(
-                context,
-                Flag::TempOffEngine,
-                "Tạm tắt bộ gõ bằng phím Alt",
-                "Nhấn và thả Alt để gõ từ hiện tại không dấu.",
-                true,
-            ),
-            self.switch(
-                context,
-                Flag::FixRecommendBrowser,
-                "Sửa lỗi gợi ý của trình duyệt",
-                "Khắc phục lỗi mất chữ khi thanh địa chỉ tự hoàn thành.",
-                true,
-            ),
-        ))
-    }
-
-    fn spelling_page(&self, context: &ViewContext<Self>) -> View {
-        let enabled = self.settings.config.check_spelling;
-        StackPanel::new().spacing(6.0).children((
-            self.switch(
-                context,
-                Flag::CheckSpelling,
-                "Kiểm tra chính tả",
-                "Không biến đổi các từ không phải tiếng Việt.",
-                true,
-            ),
-            self.switch(
-                context,
-                Flag::RestoreIfWrongSpelling,
-                "Tự khôi phục phím với từ sai",
-                "Ví dụ: gõ \"text\" sẽ giữ nguyên thay vì \"tẽt\".",
-                enabled,
-            ),
-            self.switch(
-                context,
-                Flag::AllowConsonantZfwj,
-                "Cho phép phụ âm z, f, w, j",
-                "Chấp nhận các từ mượn bắt đầu bằng z, f, w, j.",
-                enabled,
-            ),
-            self.switch(
-                context,
-                Flag::TempOffSpelling,
-                "Tạm tắt kiểm tra chính tả bằng phím Ctrl",
-                "Nhấn và thả Ctrl để bỏ qua kiểm tra cho từ hiện tại.",
-                enabled,
-            ),
-        ))
-    }
-
-    fn macros_page(&self, context: &ViewContext<Self>) -> View {
-        let use_macro = self.settings.config.use_macro;
-        let editor = card(
+        card(
             Grid::new()
-                .columns([GridLength::Star(1.0), GridLength::Star(2.0), GridLength::Auto])
-                .column_spacing(12.0)
+                .columns([GridLength::STAR, GridLength::STAR, GridLength::STAR])
+                .rows([GridLength::Auto, GridLength::Auto])
+                .column_spacing(20.0)
+                .row_spacing(14.0)
                 .children((
-                    TextBox::new()
-                        .grid_column(0)
-                        .text(self.macro_text.clone())
-                        .placeholder_text("vd: vn")
-                        .on_text_changed(context.callback(Message::MacroText))
-                        .slot(TextBoxSlot::Header, "Từ viết tắt"),
-                    TextBox::new()
-                        .grid_column(1)
-                        .text(self.macro_content.clone())
-                        .placeholder_text("vd: Việt Nam")
-                        .on_text_changed(context.callback(Message::MacroContent))
-                        .slot(TextBoxSlot::Header, "Nội dung"),
-                    StackPanel::new()
-                        .grid_column(2)
-                        .orientation(Orientation::Horizontal)
-                        .spacing(8.0)
-                        .vertical_alignment(VerticalAlignment::Bottom)
-                        .children((
-                            Button::new()
-                                .style(ButtonStyle::Accent)
-                                .is_enabled(!self.macro_text.trim().is_empty())
-                                .on_click(context.message(Message::SaveMacro))
-                                .content("Lưu"),
-                            Button::new()
-                                .is_enabled(self.macros.contains(self.macro_text.trim()))
-                                .on_click(context.message(Message::RemoveMacro))
-                                .content("Xoá"),
-                        )),
+                    cell(0, 0, language),
+                    cell(0, 1, input_type),
+                    cell(0, 2, code_table),
+                    Border::new().grid_row(1).grid_column_span(3).content(hotkey),
                 )),
-        );
+        )
+    }
+
+    fn typing_group(&self, context: &ViewContext<Self>) -> View {
+        group(
+            "Gõ",
+            StackPanel::new().children((
+                self.option(context, Flag::ModernOrthography, "Đặt dấu kiểu mới", "oà, uý thay vì òa, úy.", true),
+                self.option(context, Flag::FreeMark, "Bỏ dấu tự do", "Gõ dấu ở bất kỳ vị trí nào trong từ.", true),
+                self.option(
+                    context,
+                    Flag::QuickTelex,
+                    "Gõ nhanh (Quick Telex)",
+                    "cc → ch, gg → gi, kk → kh, nn → ng, qq → qu, pp → ph, tt → th.",
+                    true,
+                ),
+                self.option(context, Flag::QuickStartConsonant, "Phụ âm đầu nhanh", "f → ph, j → gi, w → qu.", true),
+                self.option(context, Flag::QuickEndConsonant, "Phụ âm cuối nhanh", "g → ng, h → nh, k → ch.", true),
+                self.option(
+                    context,
+                    Flag::UpperCaseFirstChar,
+                    "Viết hoa đầu câu",
+                    "Tự viết hoa sau dấu . ? ! và Enter.",
+                    true,
+                ),
+                self.option(
+                    context,
+                    Flag::TempOffEngine,
+                    "Tạm tắt bằng phím Alt",
+                    "Nhấn và thả Alt để gõ từ hiện tại không dấu.",
+                    true,
+                ),
+                self.option(
+                    context,
+                    Flag::FixRecommendBrowser,
+                    "Sửa lỗi gợi ý trình duyệt",
+                    "Khắc phục lỗi mất chữ khi thanh địa chỉ tự hoàn thành.",
+                    true,
+                ),
+            )),
+        )
+    }
+
+    fn spelling_group(&self, context: &ViewContext<Self>) -> View {
+        let enabled = self.settings.config.check_spelling;
+        group(
+            "Chính tả",
+            StackPanel::new().children((
+                self.option(
+                    context,
+                    Flag::CheckSpelling,
+                    "Kiểm tra chính tả",
+                    "Không biến đổi các từ không phải tiếng Việt.",
+                    true,
+                ),
+                self.option(
+                    context,
+                    Flag::RestoreIfWrongSpelling,
+                    "Khôi phục từ sai",
+                    "Gõ \"text\" sẽ giữ nguyên thay vì \"tẽt\".",
+                    enabled,
+                ),
+                self.option(
+                    context,
+                    Flag::AllowConsonantZfwj,
+                    "Cho phép z, f, w, j",
+                    "Chấp nhận các từ mượn bắt đầu bằng z, f, w, j.",
+                    enabled,
+                ),
+                self.option(
+                    context,
+                    Flag::TempOffSpelling,
+                    "Tạm tắt bằng phím Ctrl",
+                    "Nhấn và thả Ctrl để bỏ qua kiểm tra cho từ hiện tại.",
+                    enabled,
+                ),
+            )),
+        )
+    }
+
+    fn system_group(&self, context: &ViewContext<Self>) -> View {
+        let autostart = CheckBox::new()
+            .is_checked(self.autostart)
+            .on_is_checked_changed(context.callback(Message::Autostart))
+            .min_width(0.0)
+            .content(wrapping("Khởi động cùng Windows"));
+        group(
+            "Hệ thống",
+            StackPanel::new().children((
+                autostart,
+                self.option(
+                    context,
+                    Flag::HotkeyBeep,
+                    "Bíp khi chuyển Việt / Anh",
+                    "Phát tiếng bíp khi đổi ngôn ngữ bằng phím tắt.",
+                    true,
+                ),
+                self.option(
+                    context,
+                    Flag::SmartSwitch,
+                    "Nhớ ngôn ngữ theo ứng dụng",
+                    "Tự chuyển Việt / Anh theo từng ứng dụng đã dùng.",
+                    true,
+                ),
+                self.option(
+                    context,
+                    Flag::RememberCodeTable,
+                    "Nhớ bảng mã theo ứng dụng",
+                    "Tự chuyển bảng mã theo từng ứng dụng đã dùng.",
+                    true,
+                ),
+            )),
+        )
+    }
+
+    fn macro_group(&self, context: &ViewContext<Self>) -> View {
+        let use_macro = self.settings.config.use_macro;
+
+        let editor = Grid::new()
+            .columns([GridLength::Star(1.0), GridLength::Star(2.0), GridLength::Auto, GridLength::Auto])
+            .column_spacing(6.0)
+            .margin(Thickness::new(0.0, 0.0, 0.0, 6.0))
+            .children((
+                TextBox::new()
+                    .grid_column(0)
+                    .min_width(0.0)
+                    .text(self.macro_text.clone())
+                    .placeholder_text("Viết tắt")
+                    .on_text_changed(context.callback(Message::MacroText)),
+                TextBox::new()
+                    .grid_column(1)
+                    .min_width(0.0)
+                    .text(self.macro_content.clone())
+                    .placeholder_text("Nội dung")
+                    .on_text_changed(context.callback(Message::MacroContent)),
+                Button::new()
+                    .grid_column(2)
+                    .style(ButtonStyle::Accent)
+                    .is_enabled(!self.macro_text.trim().is_empty())
+                    .on_click(context.message(Message::SaveMacro))
+                    .content("Lưu"),
+                Button::new()
+                    .grid_column(3)
+                    .is_enabled(self.macros.contains(self.macro_text.trim()))
+                    .on_click(context.message(Message::RemoveMacro))
+                    .content("Xoá"),
+            ));
 
         let rows = self.macros.iter().map(|entry| {
             (
                 entry.text.clone(),
                 ListViewItem::new().tag(entry.text.clone()).content(
                     Grid::new()
-                        .columns([GridLength::Pixel(160.0), GridLength::STAR])
-                        .column_spacing(12.0)
+                        .columns([GridLength::Pixel(90.0), GridLength::STAR])
+                        .column_spacing(8.0)
                         .children((
                             TextBlock::new()
                                 .text(entry.text.clone())
                                 .font_weight(FontWeight::SEMI_BOLD)
+                                .text_trimming(TextTrimming::CharacterEllipsis)
                                 .grid_column(0),
                             TextBlock::new()
                                 .text(entry.content.clone())
@@ -630,108 +627,93 @@ impl SettingsWindow {
             )
         });
         let list: View = if self.macros.is_empty() {
-            TextBlock::new()
-                .text("Chưa có từ gõ tắt nào.")
-                .opacity(0.7)
-                .margin(Thickness::uniform(8.0))
-                .into()
+            caption("Chưa có từ gõ tắt nào.").margin(Thickness::uniform(4.0)).into()
         } else {
             ListView::new()
                 .selection_mode(ListViewSelectionMode::Single)
                 .selected_index(self.selected_macro)
                 .on_selection_changed(context.callback(Message::MacroSelected))
-                .max_height(320.0)
+                .max_height(160.0)
                 .collection_slot(ListViewSlot::Items, rows)
         };
 
-        StackPanel::new().spacing(6.0).children((
-            self.switch(context, Flag::UseMacro, "Bật gõ tắt", "Tự thay thế từ viết tắt khi gõ dấu cách.", true),
-            self.switch(
+        let options = StackPanel::new().children((
+            self.option(
+                context,
+                Flag::UseMacro,
+                "Bật gõ tắt",
+                "Tự thay thế từ viết tắt khi gõ dấu cách.",
+                true,
+            ),
+            self.option(
                 context,
                 Flag::UseMacroInEnglishMode,
                 "Gõ tắt cả khi ở chế độ tiếng Anh",
                 "Vẫn thay thế từ viết tắt khi tắt tiếng Việt.",
                 use_macro,
             ),
-            self.switch(
+            self.option(
                 context,
                 Flag::AutoCapsMacro,
                 "Tự viết hoa theo từ viết tắt",
                 "vn → Việt Nam, Vn → Việt Nam, VN → VIỆT NAM.",
                 use_macro,
             ),
-            section(&format!("Danh sách gõ tắt ({})", self.macros.len())),
-            editor,
-            card(list),
-        ))
+        ));
+
+        group(
+            &format!("Gõ tắt ({})", self.macros.len()),
+            Grid::new()
+                .columns([GridLength::Star(1.0), GridLength::Star(1.6)])
+                .column_spacing(16.0)
+                .children((
+                    cell(0, 0, options),
+                    cell(0, 1, StackPanel::new().children((editor, list))),
+                )),
+        )
     }
 
-    fn system_page(&self, context: &ViewContext<Self>) -> View {
-        let autostart = ToggleSwitch::new()
-            .is_on(self.autostart)
-            .on_toggled(context.callback(Message::Autostart))
-            .slots([
-                SlotView::new(ToggleSwitchSlot::OnContent, "Bật"),
-                SlotView::new(ToggleSwitchSlot::OffContent, "Tắt"),
-            ]);
+    /// Version, credits and reset; an error replaces the credits when present.
+    fn footer(&self, context: &ViewContext<Self>) -> View {
+        let left: View = match &self.error {
+            Some(message) => InfoBar::new()
+                .title("Lỗi")
+                .message(message.clone())
+                .severity(InfoBarSeverity::Error)
+                .is_open(true)
+                .is_closable(true)
+                .on_closed(context.message(Message::DismissError))
+                .into(),
+            None => StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(4.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    caption(&format!("RustKey {} · dựa trên", env!("CARGO_PKG_VERSION")))
+                        .vertical_alignment(VerticalAlignment::Center),
+                    link("OpenKey", "https://github.com/tuyenvm/OpenKey"),
+                    caption("· giao diện").vertical_alignment(VerticalAlignment::Center),
+                    link("windows-reactor", "https://docs.rs/windows-reactor"),
+                    caption("· GPL v3").vertical_alignment(VerticalAlignment::Center),
+                )),
+        };
         let reset = Button::new()
+            .style(ButtonStyle::Subtle)
             .on_click(context.message(Message::ResetDefaults))
-            .content("Khôi phục");
-        StackPanel::new().spacing(6.0).children((
-            labelled("Khởi động cùng Windows", "Chạy RustKey khi đăng nhập.", autostart),
-            self.switch(
-                context,
-                Flag::SmartSwitch,
-                "Nhớ ngôn ngữ theo ứng dụng",
-                "Tự chuyển Việt / Anh theo từng ứng dụng đã dùng.",
-                true,
-            ),
-            self.switch(
-                context,
-                Flag::RememberCodeTable,
-                "Nhớ bảng mã theo ứng dụng",
-                "Tự chuyển bảng mã theo từng ứng dụng đã dùng.",
-                true,
-            ),
-            labelled(
-                "Khôi phục cài đặt mặc định",
-                "Đưa mọi tuỳ chọn về mặc định (không xoá danh sách gõ tắt).",
-                reset,
-            ),
-        ))
-    }
-}
+            .content("Khôi phục mặc định")
+            .tooltip("Đưa mọi tuỳ chọn về mặc định (không xoá danh sách gõ tắt).");
 
-fn about_page() -> View {
-    let link = |text: &str, uri: &str| -> View {
-        match HyperlinkButton::new().navigate_uri(uri) {
-            Ok(button) => button.content(text),
-            Err(_) => TextBlock::new().text(uri).into(),
-        }
-    };
-    card(StackPanel::new().spacing(8.0).children((
-        TextBlock::new()
-            .text(format!("RustKey {}", env!("CARGO_PKG_VERSION")))
-            .font_size(20.0)
-            .font_weight(FontWeight::SEMI_BOLD),
-        TextBlock::new()
-            .text("Bộ gõ tiếng Việt viết bằng Rust, giao diện WinUI 3 (windows-reactor).")
-            .text_wrapping(TextWrapping::Wrap),
-        TextBlock::new()
-            .text(
-                "Engine gõ được chuyển từ OpenKey của Mai Vũ Tuyên và tách riêng thành \
-                 thư viện rustkey-engine để có thể dùng trên các hệ điều hành khác.",
-            )
-            .text_wrapping(TextWrapping::Wrap),
-        TextBlock::new().text("Giấy phép: GNU GPL v3.").opacity(0.7),
-        link("OpenKey trên GitHub", "https://github.com/tuyenvm/OpenKey"),
-        link("windows-reactor", "https://docs.rs/windows-reactor"),
-    )))
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(12.0)
+            .children((cell(0, 0, left), cell(0, 1, reset)))
+    }
 }
 
 /// Shows the settings window (blocks until it is closed).
 pub fn run() -> anyhow::Result<()> {
     let icon = write_icon();
+    std::thread::spawn(|| win::prepare_window_when_shown(WINDOW_TITLE, WINDOW_SIZE.0, WINDOW_SIZE.1));
     App::run_component::<SettingsWindow>(SettingsInput { icon })?;
     Ok(())
 }
@@ -799,12 +781,5 @@ mod tests {
         assert_eq!(hotkey_key_name(Some(keys::KEY_SPACE)), "Space");
         assert_eq!(hotkey_key_name(Some(keys::KEY_Z)), "Z");
         assert_eq!(hotkey_keys().len(), 38);
-    }
-
-    #[test]
-    fn pages_round_trip_tags() {
-        for page in Page::ALL {
-            assert_eq!(Page::from_tag(page.tag()), Some(page));
-        }
     }
 }

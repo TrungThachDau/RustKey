@@ -3,23 +3,30 @@
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::{null, null_mut};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE,
-    HWND,
+    HWND, RECT,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    CreateMutexW, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetClassNameW, GetWindowThreadProcessId, IsIconic, PostMessageW, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, WM_APP,
+    FindWindowW, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetWindowLongPtrW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SW_RESTORE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_APP, WS_MAXIMIZEBOX,
 };
 
 /// Window class of the hidden tray window (used for inter-process messages).
@@ -84,6 +91,83 @@ pub fn activate_window_titled(title: &str) -> bool {
             ShowWindow(hwnd, SW_RESTORE);
         }
         SetForegroundWindow(hwnd) != 0
+    }
+}
+
+/// Waits (up to a few seconds) until this process shows a top level window
+/// titled `title`, removes its maximize button, resizes its client area to
+/// `width` x `height` DIPs and centers it on its monitor's work area.
+///
+/// The WinUI window ignores the initial client size requested before it is
+/// activated, so the size is applied once the window is visible.
+pub fn prepare_window_when_shown(title: &str, width: f64, height: f64) {
+    let title = wide(title);
+    for _ in 0..200 {
+        // SAFETY: `title` is a valid null terminated string; the handle is checked.
+        let hwnd = unsafe { FindWindowW(null(), title.as_ptr()) };
+        if !hwnd.is_null() && is_own_visible_window(hwnd) {
+            disable_maximize(hwnd);
+            resize_client_centered(hwnd, width, height);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn is_own_visible_window(hwnd: HWND) -> bool {
+    let mut pid = 0;
+    // SAFETY: `hwnd` is a window handle and `pid` a valid out pointer.
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        pid == GetCurrentProcessId() && IsWindowVisible(hwnd) != 0
+    }
+}
+
+fn disable_maximize(hwnd: HWND) {
+    // SAFETY: `hwnd` is a live window of this process.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_MAXIMIZEBOX as isize));
+    }
+}
+
+fn resize_client_centered(hwnd: HWND, width: f64, height: f64) {
+    // SAFETY: `hwnd` is a live window of this process; every out pointer is
+    // a valid, properly initialised local.
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let scale = f64::from(dpi) / 96.0;
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: (width * scale).round() as i32,
+            bottom: (height * scale).round() as i32,
+        };
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        AdjustWindowRectExForDpi(&mut rect, style, 0, ex_style, dpi);
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..std::mem::zeroed()
+        };
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return;
+        }
+        let work = info.rcWork;
+        let (work_width, work_height) = (work.right - work.left, work.bottom - work.top);
+        let outer_width = (rect.right - rect.left).min(work_width);
+        let outer_height = (rect.bottom - rect.top).min(work_height);
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            work.left + (work_width - outer_width) / 2,
+            work.top + (work_height - outer_height) / 2,
+            outer_width,
+            outer_height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
     }
 }
 

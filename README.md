@@ -28,8 +28,10 @@ crates/
 - **`rustkey-windows`** (file `rustkey.exe`):
   - `rustkey.exe`: chạy ở khay hệ thống, cài `WH_KEYBOARD_LL`/`WH_MOUSE_LL`,
     phát lại kết quả bằng `SendInput`.
-  - `rustkey.exe --settings`: cửa sổ cài đặt WinUI 3 (tiến trình riêng). Khi
-    lưu, nó ghi file cấu hình rồi báo cho tiến trình khay nạp lại.
+  - `rustkey.exe --settings`: cửa sổ cài đặt WinUI 3 (tiến trình riêng), một
+    màn hình duy nhất rộng cố định 700px, có nút gạt Việt/Anh. Khi lưu, nó ghi
+    file cấu hình rồi báo cho tiến trình khay nạp lại; ngược lại cửa sổ tự cập
+    nhật khi khay đổi cấu hình (ví dụ chuyển Việt/Anh bằng phím tắt).
 
 Cấu hình lưu tại `%APPDATA%\RustKey\settings.json`, gõ tắt tại
 `%APPDATA%\RustKey\macros.txt` (cùng định dạng với OpenKey).
