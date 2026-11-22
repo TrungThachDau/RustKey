@@ -1,0 +1,18 @@
+[package]
+name = "rustkey-engine"
+description = "Platform independent Vietnamese input method engine (Telex, VNI) ported from OpenKey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = "2"
+
+[lints]
+workspace = true
