@@ -16,7 +16,9 @@ use crate::settings::{self, Settings};
 use crate::win::{self, WM_RUSTKEY_RELOAD};
 
 /// Title of the settings window (also used to find an existing window).
-pub const WINDOW_TITLE: &str = "RustKey – Cài đặt";
+pub const WINDOW_TITLE: &str = "RustKey";
+/// Project home page linked from the footer.
+const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// Client size in DIPs. The width is fixed; the height fits everything
 /// without scrolling (a scroll bar appears on shorter screens).
@@ -689,12 +691,10 @@ impl SettingsWindow {
                 .spacing(4.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
-                    caption(&format!("RustKey {} · dựa trên", env!("CARGO_PKG_VERSION")))
+                    caption(&format!("Phiên bản {}", env!("CARGO_PKG_VERSION")))
                         .vertical_alignment(VerticalAlignment::Center),
-                    link("OpenKey", "https://github.com/tuyenvm/OpenKey"),
-                    caption("· giao diện").vertical_alignment(VerticalAlignment::Center),
-                    link("windows-reactor", "https://docs.rs/windows-reactor"),
-                    caption("· GPL v3").vertical_alignment(VerticalAlignment::Center),
+                    caption("·").vertical_alignment(VerticalAlignment::Center),
+                    link("GitHub", REPOSITORY_URL),
                 )),
         };
         let reset = Button::new()
