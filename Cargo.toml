@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/rustkey-engine", "crates/rustkey-windows"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-only"
+authors = ["RustKey contributors"]
+repository = "https://github.com/TrungThachDau/RustKey"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# The build script compresses the embedded Windows App Runtime; keep it fast in every profile.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.adler2]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
