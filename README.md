@@ -32,15 +32,16 @@ crates/
     màn hình duy nhất rộng cố định 700px, có nút gạt Việt/Anh. Khi lưu, nó ghi
     file cấu hình rồi báo cho tiến trình khay nạp lại; ngược lại cửa sổ tự cập
     nhật khi khay đổi cấu hình (ví dụ chuyển Việt/Anh bằng phím tắt).
+  - `bundle.rs`: giải nén Windows App Runtime nhúng trong exe cho cửa sổ cài đặt.
 
 Cấu hình lưu tại `%APPDATA%\RustKey\settings.json`, gõ tắt tại
 `%APPDATA%\RustKey\macros.txt` (cùng định dạng với OpenKey).
 
 ## Build & chạy
 
-Yêu cầu: Rust stable (edition 2024), Windows 10 1809+ và
-[Windows App Runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
-cho cửa sổ cài đặt.
+Yêu cầu build: Rust stable (edition 2024) với toolchain MSVC. Lần build đầu
+`windows-reactor-setup` tải gói NuGet Windows App Runtime (cache ở
+`%LOCALAPPDATA%\windows-reactor-setup`).
 
 ```powershell
 cargo build --release
@@ -48,6 +49,18 @@ cargo build --release
 .\target\release\rustkey.exe --settings # mở cài đặt
 cargo test --workspace
 ```
+
+### Phân phối (một file `rustkey.exe` duy nhất)
+
+`target\release\rustkey.exe` là bản self-contained, chỉ cần copy file này sang
+máy Windows 10 1809+ (x64) là chạy, không cần cài thêm gì:
+
+- CRT được link tĩnh (`.cargo\config.toml`), không cần VC++ Redistributable.
+- Windows App Runtime (WinUI 3) được nén và nhúng vào exe (`build.rs`). Lần đầu
+  mở cài đặt, nó được giải nén (khoảng 1 giây) vào
+  `%LOCALAPPDATA%\RustKey\runtime\<id>\` cùng một bản sao của exe; cửa sổ cài
+  đặt chạy từ đó. Bộ gõ ở khay hệ thống không cần runtime này.
+- Exe chưa ký số nên lần đầu chạy Windows SmartScreen có thể cảnh báo.
 
 > Do UIPI, muốn gõ vào cửa sổ chạy quyền Administrator thì RustKey cũng phải
 > chạy với quyền Administrator.

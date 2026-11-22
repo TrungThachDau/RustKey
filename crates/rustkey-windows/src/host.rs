@@ -226,13 +226,15 @@ impl Host {
     }
 }
 
-/// Starts `rustkey.exe --settings`.
+/// Starts `rustkey.exe --settings`. Runs on a worker thread because the first
+/// start extracts the embedded runtime, which must not stall the keyboard hook.
 fn open_settings() {
-    let result = std::env::current_exe()
-        .and_then(|exe| std::process::Command::new(exe).arg(crate::SETTINGS_ARG).spawn());
-    if let Err(error) = result {
-        win::log(&format!("cannot open settings: {error}"));
-    }
+    std::thread::spawn(|| {
+        let result = crate::bundle::settings_command().and_then(|mut command| Ok(command.spawn()?));
+        if let Err(error) = result {
+            win::log(&format!("cannot open settings: {error:#}"));
+        }
+    });
 }
 
 fn taskbar_created_message() -> u32 {

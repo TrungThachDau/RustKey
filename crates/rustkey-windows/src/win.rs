@@ -267,7 +267,7 @@ pub fn set_autostart(enable: bool) -> Result<()> {
     let key = wide(RUN_KEY);
     let value = wide(RUN_VALUE);
     let status = if enable {
-        let exe = std::env::current_exe()?;
+        let exe = crate::bundle::launcher_exe()?;
         let command = wide(&format!("\"{}\"", exe.display()));
         let bytes = u32::try_from(command.len() * 2)?;
         // SAFETY: `command` lives during the call and `bytes` is its size in bytes.
