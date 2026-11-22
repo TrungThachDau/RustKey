@@ -24,7 +24,7 @@ const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 /// without scrolling (a scroll bar appears on shorter screens).
 const WINDOW_SIZE: (f64, f64) = (700.0, 800.0);
 /// The window can only get shorter than this, never wider or narrower.
-const MIN_WINDOW_HEIGHT: f64 = 600.0;
+const MIN_WINDOW_HEIGHT: f64 = 400.0;
 /// How often the settings file is checked for changes made by the tray.
 const WATCH_INTERVAL: Duration = Duration::from_millis(400);
 
